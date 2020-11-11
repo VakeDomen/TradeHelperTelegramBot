@@ -6,11 +6,7 @@ import KrakenClient from 'kraken-api';
 let adminContext: any;
 let bot: Telegram<any>;
 let kraken: KrakenClient;
-
-interface Credentials {
-    fname: string;
-    lname: string;
-}
+let historyCahe: [number, PricesSince][]
 
 interface TelegramUser {
     id: number,
@@ -34,6 +30,11 @@ interface Prices {
     result: {[ k: string ]: Pair};
 }
 
+interface PricesSince {
+    error: any;
+    result: {[ k: string ]: [string, string, number, string, string, string][] };
+}
+
 /*
     a = ask array(<price>, <whole lot volume>, <lot volume>),
     b = bid array(<price>, <whole lot volume>, <lot volume>),
@@ -55,6 +56,29 @@ interface Pair {
     l: [string, string];
     h: [string, string];
     o: string;
+}
+
+interface TradesHistory {
+    error: any;
+    result: {
+        trades: {[ k: string ]: Trade};
+        count: number;
+    }
+}
+
+interface Trade {
+    ordertxid: string;
+    postxid: string;
+    pair: string;
+    time: number;
+    type: 'buy' | 'sell';
+    ordertype: string;
+    price: string;
+    cost: string;
+    fee: string;
+    vol: string;
+    margin: string;
+    misc: string;
 }
 
 function start(): void {
@@ -83,19 +107,20 @@ const balanceCallback = async (ctx) => {
         return;
     }
     let [balance, prices]: [Balance, Prices] = await Promise.all([
-        kraken.api('Balance'), 
-        getPrices()
+        getBalance(), 
+        getPrices('XXBTZEUR,XETHZEUR')
     ]);
-    let message: string[] = ['BALANCE:'];
-    message.push(`EUR: ${balance.result.ZEUR}`);
-    message.push(`BTC: ${(Number(balance.result.XXBT) * Number(prices.result.XXBTZEUR.c[0])).toFixed(4)} (${balance.result.XXBT})`);
-    message.push(`ETH: ${(Number(balance.result.XETH) * Number(prices.result.XETHZEUR.c[0])).toFixed(4)} (${balance.result.XETH})`);
-    ctx.replyWithMarkdown(message.join("\n\t"));
+    let message: string[] = ['\`\`\`'];
+    message.push(`EUR: ${balance.result.ZEUR}€`);
+    message.push(`BTC: ${(Number(balance.result.XXBT) * Number(prices.result.XXBTZEUR.c[0])).toFixed(4)}€ (${balance.result.XXBT})`);
+    message.push(`ETH: ${(Number(balance.result.XETH) * Number(prices.result.XETHZEUR.c[0])).toFixed(4)}€ (${balance.result.XETH})`);
+    message.push('\`\`\`');
+    ctx.replyWithMarkdown(message.join("\n"));
 }
 
 
 const priceCallback = async (ctx) => {
-    const prices: Prices = await getPrices(); 
+    const prices: Prices = await getPrices('XXBTZUSD,XETHZUSD,XXBTZEUR,XETHZEUR'); 
     const table = [
         {
             CURRENCY: 'BTC',
@@ -108,19 +133,86 @@ const priceCallback = async (ctx) => {
             USD: `${Number(prices.result.XETHZUSD.c[0]).toFixed(2)}$`
         }
     ]
-    let message: string = '';
-    message += `\`\`\`\n`
-    message += ` CURRENCY |     EUR     |     USD \n`;
-    message += `--------- | ----------- | ---------\n`;
-    for (const row of table) {
-        message += `\t\t\t\t${row.CURRENCY}\t\t\t| ${row.EUR} \t\t| ${row.USD}\n`;
-    }
-    message += `\`\`\``;
+    const message = constructTable(table, ['CURRENCY', 'EUR', 'USD']);
     ctx.replyWithMarkdown(message);
 }
 
-function getPrices(): Promise<Prices> {
-    return kraken.api('Ticker', { pair : 'XXBTZUSD,XETHZUSD,XXBTZEUR,XETHZEUR' }); 
+const tradeValueCallback = async (ctx) => {
+    if (!isValidUser(ctx.update.message.from)) {
+        ctx.reply("Sorry, you should not be doing this...");
+        return;
+    }
+    const coins = ['XETH', 'XXBT'];
+    const balance = await getBalance();
+    const currentPrices = await getPrices('XXBTZUSD,XETHZUSD');
+    const lastTimestamp = await getLastTradeTimestamp();
+
+    if (!lastTimestamp || !balance) {
+        ctx.reply('No trades recorded...');
+        return;
+    }
+    for (const currency of coins) {
+        const pair = `${currency}ZUSD`;
+        if (balance.result[currency] && Number(balance.result[currency]) > 0.000001) {
+            const prices = await getUSDPricesAt(pair, lastTimestamp);
+            if (!prices) continue;
+            historyCahe[pair] = [lastTimestamp, prices];
+            const diff = (1 - (Number(prices.result[pair][0][0]) / Number(currentPrices.result[pair].c[0]))) * 100;
+            let emoji = '';
+            if (diff > 0) {
+                emoji = '✅';
+            } else {
+                emoji = '🔻'
+            }
+            ctx.reply(`${currency} value diff: ${(diff).toFixed(3)}% ${emoji}`);
+        }
+    }
+}
+
+const lastTradeCallback = async (ctx) => {
+    if (!isValidUser(ctx.update.message.from)) {
+        ctx.reply("Sorry, you should not be doing this...");
+        return;
+    }
+    const lastTimestamp = await getLastTradeTimestamp();
+    if (!lastTimestamp) {
+        ctx.reply('No trades recorded...');
+    }
+    const lastTradeTime = new Date(lastTimestamp * 1000);
+    ctx.reply(`Last trade: ${lastTradeTime.toUTCString()}`);
+}
+
+function getPrices(pairs: string): Promise<Prices> {
+    return kraken.api('Ticker', { pair : pairs }); 
+}
+
+function getBalance(): Promise<Balance> {
+    return kraken.api('Balance');
+}
+
+function getUSDPricesAt(currency: string, timestamp: number): Promise<PricesSince> {
+    if (historyCahe[currency] && timestamp === historyCahe[currency][0]) {
+        return Promise.resolve(historyCahe[currency][1]);
+    } else {
+        return kraken.api('Trades', { pair : currency, since: timestamp }); 
+    }
+}
+
+function constructTable(data: any[], keys: string[]): string {
+    let message: string = '';
+    message += `\`\`\`\n`
+    message += data.map((row: any) => {return keys.map((key: string) => row[key]).join("   |   ");}).join('\n');
+    message += `\`\`\``;
+    return message;
+}
+
+async function getLastTradeTimestamp(): Promise<number> {
+    try {
+        const data: TradesHistory = await kraken.api('TradesHistory');
+        return Math.max(...Object.values(data.result.trades).map((trade: Trade) => trade.time));
+    } catch {
+        return null;
+    }
 }
 
 function isValidUser(user: TelegramUser): boolean {
@@ -160,11 +252,14 @@ function initKraken(): void {
 }
 
 function initBot(): void {
-    console.log("Setting up bot...")
+    console.log("Setting up bot...");
+    historyCahe = [];
     bot = new Telegram(process.env.BOT_TOKEN);
     bot.start(startCallback);
     bot.command('price', priceCallback);
     bot.command('balance', balanceCallback);
+    bot.command('stonks', tradeValueCallback);
+    bot.command('last', lastTradeCallback);
     console.log("Bot set up!");
 }
 
