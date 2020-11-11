@@ -153,20 +153,50 @@ const tradeValueCallback = async (ctx) => {
     }
     for (const currency of coins) {
         const pair = `${currency}ZUSD`;
-        if (balance.result[currency] && Number(balance.result[currency]) > 0.000001) {
+        if (balance.result[currency] && Number(balance.result[currency]) > 0.00001) {
             const prices = await getUSDPricesAt(pair, lastTimestamp);
-            if (!prices) continue;
-            historyCahe[pair] = [lastTimestamp, prices];
-            const diff = (1 - (Number(prices.result[pair][0][0]) / Number(currentPrices.result[pair].c[0]))) * 100;
-            let emoji = '';
-            if (diff > 0) {
-                emoji = '✅';
-            } else {
-                emoji = '🔻'
-            }
-            ctx.reply(`${currency} value diff: ${(diff).toFixed(3)}% ${emoji}`);
+            const diff = ((Number(currentPrices.result[pair].c[0]) / Number(prices.result[pair][0][0])) - 1) * 100;
+            ctx.reply(`${currency} value diff: ${(diff).toFixed(3)}% ${getDiffEmoji(diff)}`);
         }
     }
+}
+
+const btcValueCallback = async (ctx) => {
+    if (!isValidUser(ctx.update.message.from)) {
+        ctx.reply("Sorry, you should not be doing this...");
+        return;
+    }
+    const lastTimestamp = await getLastTradeTimestamp();
+    const historyBtcPrices = await getUSDPricesAt('XXBTZUSD', lastTimestamp);
+    const historyEthPrices = await getUSDPricesAt('XETHZUSD', lastTimestamp);
+    const currentPrices = await getPrices('XXBTZUSD,XETHZUSD');
+    const usddiff = ((Number(currentPrices.result.XXBTZUSD.c[0]) / Number(historyBtcPrices.result.XXBTZUSD[0][0])) - 1) * 100;
+    const ethPricePre = Number(historyBtcPrices.result.XXBTZUSD[0][0]) / Number(historyEthPrices.result.XETHZUSD[0][0]);
+    const ethPricePost = Number(currentPrices.result.XXBTZUSD.c[0]) / Number(currentPrices.result.XETHZUSD.c[0]);
+    const ethdiff = ((ethPricePost / ethPricePre) - 1) * 100;
+    const message: string[] = [];
+    message.push(`USD: ${usddiff.toFixed(4)}% ${getDiffEmoji(usddiff)}`);
+    message.push(`ETH: ${ethdiff.toFixed(4)}% ${getDiffEmoji(ethdiff)}`);
+    ctx.replyWithMarkdown('\`\`\`\n' + message.join('\n') + '\`\`\`')
+}
+
+const ethValueCallback = async (ctx) => {
+    if (!isValidUser(ctx.update.message.from)) {
+        ctx.reply("Sorry, you should not be doing this...");
+        return;
+    }
+    const lastTimestamp = await getLastTradeTimestamp();
+    const historyBtcPrices = await getUSDPricesAt('XXBTZUSD', lastTimestamp);
+    const historyEthPrices = await getUSDPricesAt('XETHZUSD', lastTimestamp);
+    const currentPrices = await getPrices('XXBTZUSD,XETHZUSD');
+    const usddiff = ((Number(currentPrices.result.XETHZUSD.c[0]) / Number(historyEthPrices.result.XETHZUSD[0][0])) - 1) * 100;
+    const btcPricePre = Number(historyEthPrices.result.XETHZUSD[0][0]) / Number(historyBtcPrices.result.XXBTZUSD[0][0]);
+    const btcPricePost = Number(currentPrices.result.XETHZUSD.c[0]) / Number(currentPrices.result.XXBTZUSD.c[0]);
+    const btcdiff = ((btcPricePost / btcPricePre) - 1) * 100;
+    const message: string[] = [];
+    message.push(`USD: ${usddiff.toFixed(4)}% ${getDiffEmoji(usddiff)}`);
+    message.push(`BTC: ${btcdiff.toFixed(4)}% ${getDiffEmoji(btcdiff)}`);
+    ctx.replyWithMarkdown('\`\`\`\n' + message.join('\n') + '\`\`\`')
 }
 
 const lastTradeCallback = async (ctx) => {
@@ -190,12 +220,14 @@ function getBalance(): Promise<Balance> {
     return kraken.api('Balance');
 }
 
-function getUSDPricesAt(currency: string, timestamp: number): Promise<PricesSince> {
-    if (historyCahe[currency] && timestamp === historyCahe[currency][0]) {
-        return Promise.resolve(historyCahe[currency][1]);
-    } else {
-        return kraken.api('Trades', { pair : currency, since: timestamp }); 
+async function getUSDPricesAt(currency: string, timestamp: number): Promise<PricesSince> {
+    if (!(historyCahe[currency] && timestamp === historyCahe[currency][0])) {
+        historyCahe[currency] = [
+            timestamp, 
+            await kraken.api('Trades', { pair : currency, since: timestamp })
+        ];
     }
+    return Promise.resolve(historyCahe[currency][1]);
 }
 
 function constructTable(data: any[], keys: string[]): string {
@@ -223,6 +255,14 @@ function isValidUser(user: TelegramUser): boolean {
         adminContext.reply(`User ${user.first_name} ${user.last_name} (${user.id}) tryed to use my services!`);
     }
     return false;
+}
+
+function getDiffEmoji(diff: number): string {
+    if (diff > 0) {
+        return '✅';
+    } else {
+        return '🔻'
+    }
 }
 
 function checkEnv(): void {
@@ -260,6 +300,8 @@ function initBot(): void {
     bot.command('balance', balanceCallback);
     bot.command('stonks', tradeValueCallback);
     bot.command('last', lastTradeCallback);
+    bot.command('btc', btcValueCallback);
+    bot.command('eth', ethValueCallback);
     console.log("Bot set up!");
 }
 
